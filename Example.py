@@ -12,10 +12,8 @@ import os
 sys.path.append(r'C:\Repo\CanDEM')
 import CanDEM
 
-import whitebox
-wbt = whitebox.WhiteboxTools()
-wbt.set_whitebox_dir(r'C:\ProgramData\Anaconda3\envs\geo_env38v1\Lib\site-packages\whitebox')
-
+#%%
+#set the directory to hold the tile footprints
 cdm = CanDEM.CanDEM(footprint_dir=r'C:\Repo\CanDEM\Footprints')
 
 #first time, need to download footprints and consolidate them
@@ -25,7 +23,6 @@ cdm.consolidateFootprints(output_filename='Footprints.shp') #aggregates these in
 #alternatively if you already have these previous two steps done, can skip by just loading in Footprints.shp and setting it as the Footprint Gdf
 # gdf = geopd.read_file('C:\Repo\CanDEM\Footprints\Footprints.shp') 
 # cdm.setFootprintGdf(gdf)
-
 #%%
 #read in your model domain/study area
 dmn_f = r'C:\Projects\Barrie_TCE\FEFLOW\import+export\Dmn.shp'
@@ -43,18 +40,23 @@ sj['Size'].sum() #MB size of all tiles once downloaded
 dl_dir = r'E:\Projects\BarrieTCE\DEM' #where to do the download
 #download each of the tiles
 for i,r in sj.iterrows():
-    print(r['dl'])
-    CanDEM.download(r['dl'],dl_dir)    
-
-#%% mosaic them together using whitebox
+    # print(r['dl'])
+    fn = r['dl'].split('/')
+    fn = fn[10]+'_'+fn[-1]
+    CanDEM.download(url=r['dl'],directory=dl_dir,filename=fn)    
+#%%
+# putting all the rasters together
 #WARNING, the skip i'm stepping here is asserting every tile is in the same projection 
 # --> need to assert that for locations that might be near UTM Zone boundaries
-fs = glob.glob(r'E:\Projects\BarrieTCE\DEM\*.tif')
+
+fs = glob.glob(r'E:\Projects\BarrieTCE\DEM\*.tif') #all the tifs downloaded
+
 ofile = r'E:\Projects\BarrieTCE\DEM\Mosaic.tif'
        
-wbt.mosaic(
-    inputs=fs,  
-    output=ofile, 
-    method="cc", 
-)
-#%%
+#%% build a virtual raster (you can load this .vrt into Q, it's just a text file containing instructions to load all the rasters concurrently)
+vrt_options = gdal.BuildVRTOptions(resampleAlg='nearest')
+vrt = gdal.BuildVRT(r'E:\Projects\BarrieTCE\DEM\VRT.vrt',fs,options=vrt_options)
+del vrt
+#%% convert that vrt into one big raster, completing the mosaic
+tr = gdal.Translate(ofile,r'E:\Projects\BarrieTCE\DEM\VRT.vrt')
+del tr

@@ -70,12 +70,15 @@ class CanDEM:
         self.footprint_gdf = gdf
 
                 
-def download(url,directory):
+def download(url,directory,filename=None):
     # make an HTTP request within a context manager
     with requests.get(url, stream=True) as r:        
         # check header to get content length, in bytes
         total_length = int(r.headers.get("Content-Length"))
-        local_filename = url.split('/')[-1]
+        if filename==None:
+            local_filename = url.split('/')[-1]
+        else: 
+            local_filename = filename
         # implement progress bar via tqdm
         with tqdm.wrapattr(r.raw, "read", total=total_length, desc="")as raw:
             # save the output to a file
