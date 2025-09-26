@@ -17,11 +17,11 @@ import geopandas as geopd
 from shapely.geometry import Polygon
 import glob
 
-import fiona
+# import fiona
 from zipfile import ZipFile
-fiona.drvsupport.supported_drivers['kml'] = 'rw'
-fiona.drvsupport.supported_drivers['KML'] = 'rw'
-fiona.drvsupport.supported_drivers['LIBKML'] = 'rw'
+# fiona.drvsupport.supported_drivers['kml'] = 'rw'
+# fiona.drvsupport.supported_drivers['KML'] = 'rw'
+# fiona.drvsupport.supported_drivers['LIBKML'] = 'rw'
 
 class CanDEM:
     '''
