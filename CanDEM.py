@@ -16,80 +16,134 @@ from osgeo import gdal, osr
 import geopandas as geopd
 from shapely.geometry import Polygon
 import glob
-
+from urllib.parse import urljoin
 # import fiona
 from zipfile import ZipFile
-# fiona.drvsupport.supported_drivers['kml'] = 'rw'
-# fiona.drvsupport.supported_drivers['KML'] = 'rw'
-# fiona.drvsupport.supported_drivers['LIBKML'] = 'rw'
+import json
+from shapely.geometry import Polygon, mapping
+import numpy as np
+import math
+import os
+import sys
+
 
 class CanDEM:
     '''
-    class for retrieving DEM tile footprints and their corresponding high res (1M download resolution) ftp link
+    class for retrieving HR DEM from 
     '''
     
-    def __init__(self,footprint_dir):
-        assert os.path.exists(footprint_dir+r'\\'+'footprints_meta.csv'), 'footprints_meta.csv needs to be in footprint dir!'
-        self.footprint_dir = footprint_dir
+    def __init__(self,domain_file, base_url= r"https://datacube.services.geo.ca/stac/api/search"):
+        dmn = geopd.read_file(domain_file)
+        assert dmn.crs == 'epsg:4326', 'domain file must be lat long EPSG (4326)'
+        assert len(dmn) == 1,'domain file must be only a single polygon'
+        self.domain_file = domain_file
+        self.domain_gdf = dmn
+        geojson_dict = mapping(dmn['geometry'].iloc[0])
+        geojson_string = json.dumps(geojson_dict) #gets polygon payload
+        self.geojson = geojson_string       
+        self.payload = {
+            "collections": ["hrdem-mosaic-1m", "hrdem-mosaic-2m"],
+            "intersects": geojson_string,
+            "limit": 5
+        }
+        self.asset_dict = self.getAssets(base_url,self.payload)
+        
+    def getAssets(self,url,payload):
+        response = requests.get(url, params=payload)
+        response.raise_for_status() # Ensure the request succeeded
+        # Parse the STAC GeoJSON feature collection result
+        stac_data = response.json()    
+        asset_dict = {}
+        for feature in stac_data.get("features", []):
+            print(f"Feature ID: {feature['id']}")
+            if '2m' in feature['id']:
+                k = '2m'            
+            elif '1m' in feature['id']:
+                k = '1m'
+            asset_dict[k] = []
+            # Extract the download URLs for the DTM (Digital Terrain Model) or DSM
+            assets = feature.get("assets", {})
+            # print(assets)
+            if "dtm" in assets:
+                # print(f"  DTM URL: {assets['dtm']['href']}")
+                asset_dict[k].append(assets['dtm']['href'])
+        return asset_dict
     
-    def downloadFootprints(self):
-        '''downloads all the kmz files for every footprint region'''
-        fp = pd.read_csv(self.footprint_dir+'\\footprints_meta.csv')
-        fpf = fp['Download link for datasets footprints in KMZ format for the first coordinate system'].to_list()
-        for f in fpf:
-            download(f,self.footprint_dir)
-    
-    def consolidateFootprints(self,output_filename=None):
-        '''extracts each kmz file and consolidates into a single geodataframe of every tile footprint'''
-        gdf = geopd.GeoDataFrame()
-        for f in glob.glob(self.footprint_dir+r'\\*.kmz'):
-            print(f)
-            kmz = ZipFile(f,'r')
-            kmz.extract('doc.kml',self.footprint_dir+r'\\Temp')
-            app = geopd.read_file(self.footprint_dir+r'\\Temp\doc.kml')[['Name','description','geometry']]
-            #getting download links out of the description field using html parsing magic
-            dl_links = []
-            for i,r in app.iterrows():
-                desc = r['description']
-                soup = BeautifulSoup(desc,'html.parser')
-                hrefs = [x['href'] for x in soup.find_all('a',href=True)] #grabs all hrefs
-                opts = [x.split(r'/') for x in hrefs] #breaks up directory structure
-                #fragile but fits current ftp dir
-                #gets the index corresponding to the dtm download
-                dtm_ind = [i for i,x in enumerate(opts) if x[7][0:3]=='dtm' and x[-1][0:3]=='dtm'][0] 
-                dl_links.append(hrefs[dtm_ind])
-            app['dl'] = dl_links
-            # [['Name','geometry']]
-            gdf = pd.concat([gdf,app])
-        self.footprint_gdf = gdf.reset_index(drop=True)
-        if output_filename is not None:
-            gdf.to_file(self.footprint_dir+'\\'+output_filename)
-           
-    def setFootprintGdf(self,gdf):
-        '''bypasses downloadFootprints and consolidateFootprints by pointing the instance to a loaded gdf of the consolidate footprints'''
-        self.footprint_gdf = gdf
+    def estimate_download_size(self, url):
+        """Calculates the expected output dimensions and maximum uncompressed file size."""
+        # 1. Instantly read remote metadata headers (takes milliseconds)
+        ds = gdal.Open('/vsicurl/'+url)
+        wkt = ds.GetProjection()
+        #create a reprojected clipping polygon
+        polygon = self.domain_gdf.to_crs(wkt)['geometry'].iloc[0]
+        geotransform = ds.GetGeoTransform()
+        pixel_width = abs(geotransform[1])   # Typically 1.0 for this HRDEM
+        pixel_height = abs(geotransform[5])  # Typically 1.0 for this HRDEM
+        # Get Data Type (Float32 = 4 Bytes, Int16 = 2 Bytes, etc.)
+        band = ds.GetRasterBand(1)
+        bytes_per_pixel = gdal.GetDataTypeSize(band.DataType)//8
+        
+        # 2. Get the rectangular outer bounding box of your Shapely polygon
+        minx, miny, maxx, maxy = polygon.bounds
+        # 3. Convert geographic distance (meters) to target pixels
+        out_width = math.ceil((maxx - minx) / pixel_width)
+        out_height = math.ceil((maxy - miny) / pixel_height)
+        
+        # 4. Apply the size calculation formula
+        total_bytes = out_width * out_height * bytes_per_pixel * ds.RasterCount
+        size_mb = total_bytes / (1024 * 1024)    
+        print("--- Pre-Download Assessment ---")
+        print(f"Output Raster Dimensions : {out_width} x {out_height} pixels")
+        print(f"Estimated Max File Size  : {size_mb:.2f} MB")
+        print("--------------------------------")
+        # Clean up dataset connection pointer
+        ds = None
+        
+    def DL_DEM(self,url,output_file,dstSRS=None):
+        #get the epsg of the raster
+        ds = gdal.Open('/vsicurl/'+url)
+        wkt = ds.GetProjection()
+        #create a reprojected clipping polygon
+        dmn_poly = self.domain_gdf.to_crs(wkt)['geometry'].iloc[0]
+        geojson_dict = mapping(dmn_poly)
+        geojson_structure = {
+                            "type": "FeatureCollection",
+                            "features": [{
+                                "type": "Feature",
+                                "geometry": geojson_dict,
+                                "properties": {}
+                            }]
+                        }
+        geojson_feature = json.dumps(geojson_structure)
+        # print(geojson_feature)
+        # 4. Write the GeoJSON string into GDAL's in-memory virtual file system
+        # This creates a "fake" file path that GDAL utilities can read directly
+        vsimem_geojson_path = "/vsimem/clip_poly.geojson"
+        gdal.FileFromMemBuffer(vsimem_geojson_path,geojson_feature)
+        if dstSRS == None:
+            dstSRS = wkt
+        # 5. Configure the Warp options to match your exact command-line flags
+        warp_options = gdal.WarpOptions(
+            cutlineDSName=vsimem_geojson_path,  # -cutline
+            cropToCutline=True,                 # -crop_to_cutline
+            dstNodata=-9999,
+            cutlineSRS = wkt,
+            dstSRS=dstSRS                     
+            )
+        # estimate_download_size(dmn_poly,'/vsicurl/'+url)
+        try:
+            print("Streaming remote raster and applying polygon mask...")
+            # 6. Execute the Warp operation
+            out_ds = gdal.Warp(output_file, '/vsicurl/'+url, options=warp_options,callback=gdal.TermProgress_nocb)
+            out_ds = None
+            print(f"✅ Successfully created: {output_file}")
+        
+        finally:
+            # 7. Clean up the in-memory virtual file to free up RAM
+            gdal.Unlink(vsimem_geojson_path)
 
-                
-def download(url,directory,filename=None):
-    # make an HTTP request within a context manager
-    with requests.get(url, stream=True) as r:        
-        # check header to get content length, in bytes
-        total_length = int(r.headers.get("Content-Length"))
-        if filename==None:
-            local_filename = url.split('/')[-1]
-        else: 
-            local_filename = filename
-        # implement progress bar via tqdm
-        with tqdm.wrapattr(r.raw, "read", total=total_length, desc="")as raw:
-            # save the output to a file
-            with open(directory+r'\\'+local_filename, 'wb')as output:
-                shutil.copyfileobj(raw, output)
-                
-def getDLSize(url):
-    '''given a download url, gets the size of what the download should be'''
-    with requests.get(url, stream=True) as r:
-        total_length = int(r.headers.get("Content-Length"))
-    return total_length/10**6     
+
+
 
 
 

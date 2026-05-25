@@ -12,51 +12,30 @@ import os
 sys.path.append(r'C:\Repo\CanDEM')
 import CanDEM
 
-#%%
-#set the directory to hold the tile footprints
-cdm = CanDEM.CanDEM(footprint_dir=r'C:\Repo\CanDEM\Footprints')
+#example
+cdm = CanDEM.CanDEM(domain_file=r'C:\Repo\CanDEM\AOI.geojson') #area of interest in lat long (epsg:4326)
 
-#first time, need to download footprints and consolidate them
-cdm.downloadFootprints() #downloads kmz files of all canadian dem tile footprints to footprint dir
-cdm.consolidateFootprints(output_filename='Footprints.shp') #aggregates these into one gdf, output_filename = shape file export
+#all dem assets touching will populate in cdm.asset_dict --> this one has only one 2m
+print(cdm.asset_dict)
 
-#alternatively if you already have these previous two steps done, can skip by just loading in Footprints.shp and setting it as the Footprint Gdf
-# gdf = geopd.read_file('C:\Repo\CanDEM\Footprints\Footprints.shp') 
-# cdm.setFootprintGdf(gdf)
-#%%
-#read in your model domain/study area
-dmn_f = r'C:\Projects\Barrie_TCE\FEFLOW\import+export\Dmn.shp'
-dmn = geopd.read_file(dmn_f)
-#go lat long for "universal" projection, and same projection as the footprints
-dmn = dmn.to_crs('epsg:4326')
-#%%
-#simple spatial join to the footprints to get footprints intersecting with model domain
-sj = cdm.footprint_gdf.sjoin(dmn,predicate='intersects') 
-sj['dl'] #these are the DEMs to download
-#%% good idea to check how big a download this would be
-sj['Size'] = sj['dl'].apply(lambda x: CanDEM.getDLSize(x)) #gets the size of each download 
-sj['Size'].sum() #MB size of all tiles once downloaded
-#%%
-dl_dir = r'E:\Projects\BarrieTCE\DEM' #where to do the download
-#download each of the tiles
-for i,r in sj.iterrows():
-    # print(r['dl'])
-    fn = r['dl'].split('/')
-    fn = fn[10]+'_'+fn[-1]
-    CanDEM.download(url=r['dl'],directory=dl_dir,filename=fn)    
-#%%
-# putting all the rasters together
-#WARNING, the skip i'm stepping here is asserting every tile is in the same projection 
-# --> need to assert that for locations that might be near UTM Zone boundaries
+#this will estimate the download size by querying a dem asset with your domain (and handling projection stuff)
+cdm.estimate_download_size(cdm.asset_dict['2m'][0])
 
-fs = glob.glob(r'E:\Projects\BarrieTCE\DEM\*.tif') #all the tifs downloaded
+#downloads it
+cdm.DL_DEM(url=cdm.asset_dict['2m'][0]
+            ,output_file=r'C:\Repo\CanDEM\DEM.tif'
+            ,dstSRS='epsg:26912')
+#%%
+# putting all the rasters together workflow if you need to download multiple
 
-ofile = r'E:\Projects\BarrieTCE\DEM\Mosaic.tif'
+# fs = glob.glob(r'where your tifs are\*.tif') #all the tifs downloaded
+
+# ofile = r'output place\Mosaic.tif'
        
-#%% build a virtual raster (you can load this .vrt into Q, it's just a text file containing instructions to load all the rasters concurrently)
-vrt_options = gdal.BuildVRTOptions(resampleAlg='nearest')
-vrt = gdal.BuildVRT(r'E:\Projects\BarrieTCE\DEM\VRT.vrt',fs,options=vrt_options)
-del vrt
-#%% convert that vrt into one big raster, completing the mosaic
-tr = gdal.Translate(ofile,r'E:\Projects\BarrieTCE\DEM\VRT.vrt')
-del tr
+# #%% build a virtual raster (you can load this .vrt into Q, it's just a text file containing instructions to load all the rasters concurrently)
+# vrt_options = gdal.BuildVRTOptions(resampleAlg='nearest')
+# vrt = gdal.BuildVRT(r'output place\VRT.vrt',fs,options=vrt_options)
+# del vrt
+# #%% convert that vrt into one big raster, completing the mosaic
+# tr = gdal.Translate(ofile,r'output place\VRT.vrt')
+# del tr
